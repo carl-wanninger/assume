@@ -2,15 +2,21 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-from datetime import datetime
 
-import pandas as pd
 import pytest
 
-from assume.scenario.loader_csv import (
-    load_config_and_create_forecaster,
-    make_market_config,
+from assume.common.forecast_algorithms import (
+    calculate_naive_congestion_signal,
+    calculate_naive_price,
+    calculate_naive_renewable_utilisation,
+    calculate_naive_residual_load,
 )
+from assume.scenario.loader_csv import (
+    get_unit_forecast_algorithms,
+    load_config_and_create_forecaster,
+    setup_world,
+)
+from assume.world import World
 
 
 def test_csv_loader_validation():
@@ -29,42 +35,156 @@ def test_csv_loader_validation():
         )
 
 
-def test_make_market_config_invalid_datatypes():
+def test_csv_loader_forecaster_algorithms():
     """
-    Test that make_market_config raises appropriate errors when
-    passed incorrect datatypes in market_params.
+    Testing forecast_algorithm loading. This includes:
+        setting via config
+        setting via csv (overwrites config if not None)
+    for forecast, preprocess and update algorithms.
+    Includes:
+        test in config and csv with forecasts that are not present in the other.
     """
-    world_start = datetime(2025, 1, 1)
-    world_end = datetime(2025, 1, 10)
-    market_id = "test_market"
+    scenario_data = load_config_and_create_forecaster(
+        inputs_path="tests/fixtures", scenario="different_forecasts", study_case="base"
+    )
 
-    # 1. Test invalid 'products' type (Expected: list of dicts, Given: int)
-    invalid_params_products = {
-        "opening_frequency": "h",
-        "opening_duration": pd.Timedelta(hours=1),
-        "market_mechanism": "auction",
-        "products": 12345,  # Should be a list
-    }
-    with pytest.raises(TypeError):
-        make_market_config(market_id, invalid_params_products, world_start, world_end)
+    forecasters = scenario_data["unit_forecasts"]
 
-    # 2. Test invalid 'opening_duration' (Expected: duration string/Timedelta, Given: list)
-    invalid_params_duration = {
-        "opening_frequency": "h",
-        "opening_duration": pd.Timedelta(hours=1),  # Invalid for pd.Timedelta
-        "market_mechanism": "auction",
-        "products": [],
+    expected_forcast_algorithms = {
+        "Unit 1": {
+            "price": "price_naive_forecast",
+            "residual_load": "not_yet_implemented_learnable_forecast",
+            "congestion_signal": "congestion_signal_special_forecast",
+            "new_specific_forecast": "new_naive_forecast",
+            "other": None,
+        },
+        "Unit 2": {
+            "price": "price_naive_forecast",
+            "residual_load": "default_test",
+            "congestion_signal": "congestion_signal_special_forecast",
+            "new_specific_forecast": "new_naive_forecast",
+            "other": "default_test",
+        },
+        "Unit 3": {
+            "price": "price_naive_forecast",
+            "residual_load": "residual_load_naive_forecast",
+            "congestion_signal": "congestion_signal_special_forecast",
+            "new_specific_forecast": "new_naive_forecast",
+            "other": "nothing_special",
+        },
+        "Unit 4": {
+            "price": "default_test",
+            "residual_load": "residual_load_naive_forecast",
+            "congestion_signal": "congestion_signal_special_forecast",
+            "new_specific_forecast": "new_naive_forecast",
+            "other": "nothing_special",
+        },
+        "demand_EOM": {
+            "price": "price_naive_forecast",
+            "residual_load": "not_yet_implemented_learnable_forecast",
+            "congestion_signal": "congestion_signal_special_forecast",
+            "new_specific_forecast": "new_naive_forecast",
+        },
     }
-    with pytest.raises((TypeError, ValueError)):
-        make_market_config(market_id, invalid_params_duration, world_start, world_end)
 
-    # 3. Test invalid 'start_date' format (Expected: date string, Given: unexpected object)
-    invalid_params_date = {
-        "opening_frequency": "h",
-        "opening_duration": "1h",
-        "market_mechanism": "auction",
-        "products": [],
-        "start_date": {"year": 2025},  # pd.Timestamp will fail here
+    # Also include preprocess and update algorithms
+    for key in expected_forcast_algorithms:
+        expected_forcast_algorithms[key]["preprocess_price"] = "price_default"
+        expected_forcast_algorithms[key]["preprocess_residual_load"] = (
+            "residual_load_default"
+        )
+        expected_forcast_algorithms[key]["preprocess_congestion_signal"] = (
+            "congestion_signal_default"
+        )
+        expected_forcast_algorithms[key]["preprocess_renewable_utilisation"] = (
+            "renewable_utilisation_special"
+        )
+
+        expected_forcast_algorithms[key]["update_price"] = "price_default"
+        expected_forcast_algorithms[key]["update_residual_load"] = "residual_load_fancy"
+        expected_forcast_algorithms[key]["update_congestion_signal"] = (
+            "congestion_signal_default"
+        )
+        expected_forcast_algorithms[key]["update_renewable_utilisation"] = (
+            "renewable_utilisation_special"
+        )
+
+    expected_forcast_algorithms["Unit 1"]["preprocess_residual_load"] = (
+        "residual_load_prepare_multiple"
+    )
+    expected_forcast_algorithms["Unit 2"]["update_congestion_signal"] = (
+        "congestion_signal_neural_net"
+    )
+    expected_forcast_algorithms["Unit 3"]["update_congestion_signal"] = (
+        "congestion_signal_special"
+    )
+
+    for unit, forecaster in forecasters.items():
+        for (
+            forecast_type,
+            forecast_algorithm_id,
+        ) in forecaster.forecast_algorithms.items():
+            assert (
+                forecast_algorithm_id
+                == expected_forcast_algorithms[unit][forecast_type]
+            ), (
+                f"{unit}, forecast type: {forecast_type}, {forecast_algorithm_id} != {expected_forcast_algorithms[unit][forecast_type]}"
+            )
+
+
+def test_get_unit_forecast_algorithms():
+    powerplant_dict = {
+        "forecast_test": "value1",
+        "forecast_test2": "value2",
+        "test3": "value3",
+        "forecast_test5": None,  # Make sure that config values can overwrite None!
     }
-    with pytest.raises((TypeError, ValueError)):
-        make_market_config(market_id, invalid_params_date, world_start, world_end)
+    powerplant_dict_copy = powerplant_dict.copy()
+
+    config_dict = {
+        "test": "other",
+        "test4": "other2",
+        "test5": "other3",
+    }
+    config_dict_copy = config_dict.copy()
+
+    expected_output = {
+        "test": "value1",
+        "test2": "value2",
+        "test4": "other2",
+        "test5": "other3",
+    }
+
+    output = get_unit_forecast_algorithms(config_dict, powerplant_dict)
+
+    # Make sure powerplant_dict is not overwritten
+    for key in powerplant_dict:
+        assert powerplant_dict[key] == powerplant_dict_copy[key]
+
+    # Make sure config_dict is not overwritten
+    for key in config_dict:
+        assert config_dict[key] == config_dict_copy[key]
+
+    # Make sure only strings with "forecast_" are accepted
+    for key in expected_output:
+        assert expected_output[key] == output[key]
+
+
+def test_cache_unit_forecast_algorithms_cache_hits():
+    calculate_naive_price.cache_clear()
+    calculate_naive_residual_load.cache_clear()
+    calculate_naive_congestion_signal.cache_clear()
+    calculate_naive_renewable_utilisation.cache_clear()
+
+    world = World()
+    world.scenario_data = load_config_and_create_forecaster(
+        inputs_path="tests/fixtures", scenario="forecast_init", study_case="base"
+    )
+
+    setup_world(world=world)
+
+    assert calculate_naive_price.cache_info().hits == len(world.units) - 1
+    assert calculate_naive_price.cache_info().misses == 1
+
+    assert calculate_naive_residual_load.cache_info().hits == len(world.units) - 1
+    assert calculate_naive_residual_load.cache_info().misses == 1
